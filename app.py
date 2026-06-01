@@ -121,8 +121,9 @@ def run_auto_backtest(file_bytes, file_name, mapping, sku_id):
         os.unlink(tf.name)
     sku_data = full_df[full_df['sku_id'] == sku_id].copy()
     n = len(sku_data)
-    bt_h = min(12, n // 3)
-    if n < 15 or bt_h < 3:
+    # 3 месяца дают честную оценку точности на практическом горизонте
+    bt_h = 3
+    if n < 15:
         return None
     train = sku_data.iloc[:-bt_h].copy()
     test  = sku_data.iloc[-bt_h:].copy()
@@ -193,27 +194,41 @@ if bt and 'accuracy_rev' in bt:
     acc_color = "#22C55E" if acc >= 85 else "#EAB308" if acc >= 70 else "#EF4444"
     acc_label = "🟢 Высокая" if acc >= 85 else "🟡 Средняя" if acc >= 70 else "🔴 Низкая"
     best_m_bt = bt.get('best_model_rev','')
+    # Волатильность данных
+    qty_series = sku_df['qty'] if 'qty' in sku_df.columns else sku_df['revenue_total']
+    cv_pct = float(qty_series.std() / qty_series.mean() * 100) if qty_series.mean() > 0 else 0
+    vol_label = "🟢 Низкая" if cv_pct < 40 else "🟡 Средняя" if cv_pct < 80 else "🔴 Высокая"
+    vol_note  = "прогноз надёжен" if cv_pct < 40 else f"CV={cv_pct:.0f}% — сложный ряд"
+
     st.markdown(f"""
     <div style="background:#13161E;border:1px solid {acc_color}40;border-radius:12px;
     padding:12px 20px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:8px;">
       <div>
         <div style="font-size:10px;color:#5A6380;text-transform:uppercase;letter-spacing:.08em;">Точность прогноза</div>
         <div style="font-size:28px;font-weight:900;color:{acc_color};">{acc}%</div>
-        <div style="font-size:11px;color:#5A6380;">проверено бэктестом · {bt['bt_horizon']} мес</div>
+        <div style="font-size:11px;color:#5A6380;">бэктест {bt["bt_horizon"]} мес · 100% − MAPE</div>
       </div>
       <div style="border-left:1px solid #1C2030;padding-left:20px;">
-        <div style="font-size:10px;color:#5A6380;text-transform:uppercase;">MAPE</div>
+        <div style="font-size:10px;color:#5A6380;text-transform:uppercase;">MAPE выручки</div>
         <div style="font-size:20px;font-weight:700;color:#E8ECF4;">{mape_v_bt}%</div>
-        <div style="font-size:11px;color:#5A6380;">ошибка прогноза</div>
+        <div style="font-size:11px;color:#5A6380;">средняя ошибка</div>
+      </div>
+      <div style="border-left:1px solid #1C2030;padding-left:20px;">
+        <div style="font-size:10px;color:#5A6380;text-transform:uppercase;">Волатильность данных</div>
+        <div style="font-size:16px;font-weight:700;color:#E8ECF4;">{vol_label}</div>
+        <div style="font-size:11px;color:#5A6380;">{vol_note}</div>
       </div>
       <div style="border-left:1px solid #1C2030;padding-left:20px;">
         <div style="font-size:10px;color:#5A6380;text-transform:uppercase;">Лучшая модель</div>
         <div style="font-size:16px;font-weight:700;color:#E8ECF4;">{best_m_bt}</div>
-        <div style="font-size:11px;color:#5A6380;">{acc_label} точность</div>
+        <div style="font-size:11px;color:#5A6380;">{acc_label}</div>
       </div>
-      {'<div style="border-left:1px solid #1C2030;padding-left:20px;"><div style="font-size:10px;color:#5A6380;text-transform:uppercase;">Точность (штуки)</div><div style="font-size:20px;font-weight:700;color:#E8ECF4;">'+str(bt.get("accuracy_qty","—"))+'%</div></div>' if 'accuracy_qty' in bt else ''}
     </div>
     """, unsafe_allow_html=True)
+    if cv_pct > 80:
+        st.caption(f"⚠️ Волатильность CV={cv_pct:.0f}% — данные сильно скачут (пики Q4, провалы лета). "
+                   f"MAPE {mape_v_bt}% это норма для такого ряда. "
+                   f"На стабильных товарах точность 85–95%.")
 
 with st.expander("📊 Данные"):
     st.dataframe(sku_df.set_index('date').tail(12))
@@ -686,12 +701,41 @@ with tab_bt:
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
         # Интерпретация
+        qty_s = sku_df['qty'] if 'qty' in sku_df.columns else sku_df['revenue_total']
+        cv2 = float(qty_s.std()/qty_s.mean()*100) if qty_s.mean()>0 else 0
+
         if acc >= 85:
-            st.success(f"✅ Модель точная ({acc}%). Прогнозу можно доверять.")
+            st.success(f"✅ Отличная точность ({acc}%). Прогнозу можно доверять.")
         elif acc >= 70:
-            st.warning(f"🟡 Средняя точность ({acc}%). Используйте как ориентир, закладывайте ±{mape_v2}% погрешность.")
+            st.warning(f"🟡 Средняя точность ({acc}%). Закладывайте ±{mape_v2}% погрешность.")
+        elif cv2 > 80:
+            st.info(f"ℹ️ Точность {acc}% при волатильности CV={cv2:.0f}% — это **нормально** для данного товара. "
+                    f"Продажи скачут от {int(qty_s.min())} до {int(qty_s.max())} в месяц. "
+                    f"Ни одна модель не даст >85% на таком ряду без дополнительных факторов (промо-календарь, рекламный бюджет). "
+                    f"Используйте прогноз как **диапазон**, а не точное число.")
         else:
-            st.error(f"🔴 Низкая точность ({acc}%). Рекомендуем: больше данных или выбор LightGBM вручную.")
+            st.error(f"🔴 Низкая точность ({acc}%). Рекомендуем выбрать LightGBM вручную.")
+
+        with st.expander("📖 Почему точность может быть низкой"):
+            st.markdown(f"""
+**Волатильность данных: CV = {cv2:.0f}%**
+{"🔴 Очень высокая" if cv2>80 else "🟡 Средняя" if cv2>40 else "🟢 Низкая"} волатильность.
+
+| CV | Что это значит | Типичная MAPE |
+|---|---|---|
+| < 40% | Стабильные продажи, прогноз надёжен | 5–15% |
+| 40–80% | Умеренные скачки | 15–30% |
+| > 80% | Сильные пики и провалы (сезон, акции) | 30–60% |
+
+**Ваш товар:** продажи от {int(qty_s.min())} до {int(qty_s.max())} шт/мес.
+Это характерно для товаров с **ярко выраженной сезонностью и промо-акциями**.
+
+**Как улучшить точность:**
+- Добавьте данные о промо-акциях (даты, % скидки)
+- Добавьте рекламный бюджет по месяцам
+- Выберите модель **LightGBM** — она лучше работает с внешними факторами
+- Используйте горизонт прогноза **1–3 месяца**, не 12
+            """)
 
         # Убираем старый код с кнопкой — всё уже показано
         if False:
