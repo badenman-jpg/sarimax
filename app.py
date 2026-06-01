@@ -135,7 +135,7 @@ with st.expander("📊 Данные"):
 
 
 # ── Вкладки ────────────────────────────────────────────────────────────────
-tab_fc, tab_el, tab_sc, tab_mc = st.tabs(["📈 Прогноз","📉 Эластичность","🎯 Сценарий","🌍 Макро"])
+tab_fc, tab_el, tab_sc, tab_mc, tab_bt = st.tabs(["📈 Прогноз","📉 Эластичность","🎯 Сценарий","🌍 Макро","🔬 Бэктест"])
 
 
 # ── Эластичность ──────────────────────────────────────────────────────────
@@ -503,3 +503,202 @@ with tab_fc:
         st.warning("⚠️ MAPE > 30% — выберите LightGBM вручную или добавьте данных.")
     elif mv < 15:
         st.success(f"✅ Точность высокая (MAPE {mv:.1f}%)")
+
+
+# ── Бэктест ────────────────────────────────────────────────────────────────
+with tab_bt:
+    st.markdown("#### 🔬 Бэктестирование — калибровка точности")
+    st.caption("Обучаем модель на части данных, прогнозируем вперёд, сравниваем с реальным фактом из файла.")
+
+    n_months = len(sku_df)
+    max_test  = min(18, n_months // 3)
+    min_train = 12
+
+    if n_months < min_train + 3:
+        st.warning(f"Мало данных для бэктеста. Нужно минимум {min_train + 3} месяцев, есть {n_months}.")
+    else:
+        bt_horizon = st.slider(
+            "Горизонт бэктеста (мес) — сколько последних месяцев использовать как тест",
+            min_value=3, max_value=max_test, value=min(12, max_test), key="bt_h"
+        )
+        bt_force = st.selectbox("Модель для бэктеста",
+            ["🤖 Авто (ансамбль)","LightGBM","ETS","SARIMAX"], key="bt_m")
+        bt_run = st.button("▶️ Запустить бэктест", key="bt_run")
+
+        if bt_run:
+            # Разбивка: обучение на первых N-bt_horizon, тест на последних bt_horizon
+            train_df = sku_df.iloc[:-bt_horizon].copy()
+            test_df  = sku_df.iloc[-bt_horizon:].copy()
+            test_dates = pd.to_datetime(test_df['date'].values)
+
+            bt_force_map = {"🤖 Авто (ансамбль)": None, "LightGBM":"LightGBM",
+                            "ETS":"ETS", "SARIMAX":"SARIMAX"}
+            bt_fm = bt_force_map[bt_force]
+
+            with st.spinner(f"Обучаем на {len(train_df)} мес, прогнозируем на {bt_horizon} мес..."):
+                bt_qty_res = bt_rev_res = None
+                try:
+                    if has_qty:
+                        bt_qty_res = ensemble_forecast(train_df, target='qty',
+                                                       horizon=bt_horizon, force_model=bt_fm)
+                except Exception as e:
+                    st.warning(f"Бэктест штук: {e}")
+                try:
+                    bt_rev_res = ensemble_forecast(train_df, target='revenue_total',
+                                                   horizon=bt_horizon, force_model=bt_fm)
+                except Exception as e:
+                    st.error(f"Бэктест выручки: {e}"); st.stop()
+
+            # ── Метрики точности ──────────────────────────────────────────
+            def bt_metrics(pred, actual, label):
+                mask = actual > 0
+                if mask.sum() == 0: return {}
+                mape_v = float(np.mean(np.abs((actual[mask]-pred[mask])/actual[mask]))*100)
+                rmse_v = float(np.sqrt(np.mean((actual-pred)**2)))
+                bias_v = float(np.mean((pred-actual)/actual[mask])*100)
+                return {"Метрика": label, "MAPE %": round(mape_v,1),
+                        "RMSE": f"{rmse_v:,.0f}", "Bias %": f"{bias_v:+.1f}%",
+                        "Оценка": "✅ Отлично" if mape_v<15 else "🟡 Средне" if mape_v<30 else "🔴 Плохо"}
+
+            metrics_rows = []
+            if bt_qty_res:
+                actual_qty = test_df['qty'].values if 'qty' in test_df.columns else None
+                if actual_qty is not None:
+                    metrics_rows.append(bt_metrics(bt_qty_res.forecast, actual_qty, "Штуки"))
+            actual_rev = test_df['revenue_total'].values
+            metrics_rows.append(bt_metrics(bt_rev_res.forecast, actual_rev, "Выручка (прямой)"))
+            if bt_qty_res and 'avg_price' in train_df.columns:
+                bp_bt = float(train_df['avg_price'].dropna().tail(3).mean())
+                rev_from_q = bt_qty_res.forecast * bp_bt
+                metrics_rows.append(bt_metrics(rev_from_q, actual_rev, "Выручка (шт×цена)"))
+
+            if metrics_rows:
+                st.markdown("##### 📊 Точность прогноза на историческом тесте")
+                mdf = pd.DataFrame(metrics_rows)
+                st.dataframe(mdf, use_container_width=True, hide_index=True)
+
+            # ── График 1: Штуки бэктест ───────────────────────────────────
+            if bt_qty_res and 'qty' in test_df.columns:
+                st.markdown("##### 📦 Штуки: прогноз vs факт")
+                actual_qty = test_df['qty'].values
+                fig_bt_q = go.Figure()
+                # Полная история
+                fig_bt_q.add_trace(go.Scatter(
+                    x=sku_df['date'], y=sku_df['qty'] if 'qty' in sku_df.columns else sku_df['revenue_total'],
+                    name="Факт (всё)", line=dict(color="#4F8EF7", width=2, dash="dot"),
+                    opacity=0.5,
+                    hovertemplate="%{x|%b %Y}: <b>%{y:,.0f}</b><extra></extra>"))
+                # Тренировочная часть
+                fig_bt_q.add_trace(go.Scatter(
+                    x=train_df['date'], y=train_df['qty'],
+                    name=f"Обучение ({len(train_df)} мес)", line=dict(color="#4F8EF7", width=2.5),
+                    hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} шт</b><extra></extra>"))
+                # Факт тестового периода
+                fig_bt_q.add_trace(go.Scatter(
+                    x=test_dates, y=actual_qty,
+                    name="Факт (тест)", line=dict(color="#22C55E", width=2.5),
+                    mode="lines+markers", marker=dict(size=8, symbol="circle"),
+                    hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} шт (факт)</b><extra></extra>"))
+                # CI
+                xci_bt = list(bt_qty_res.forecast_dates) + list(bt_qty_res.forecast_dates[::-1])
+                yci_bt = list(bt_qty_res.ci_upper) + list(bt_qty_res.ci_lower[::-1])
+                fig_bt_q.add_trace(go.Scatter(x=xci_bt, y=yci_bt, fill="toself",
+                    fillcolor="rgba(239,68,68,.12)", line=dict(color="rgba(0,0,0,0)"),
+                    name="80% CI", hoverinfo="skip"))
+                # Прогноз
+                xfc_bt = [pd.Timestamp(train_df['date'].iloc[-1])] + list(bt_qty_res.forecast_dates)
+                yfc_bt = [float(train_df['qty'].iloc[-1])] + list(bt_qty_res.forecast)
+                fig_bt_q.add_trace(go.Scatter(x=xfc_bt, y=yfc_bt,
+                    name="Прогноз", line=dict(color="#EF4444", width=2.5, dash="dash"),
+                    mode="lines+markers", marker=dict(size=8),
+                    hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} шт (прогноз)</b><extra></extra>"))
+                # Вертикальная линия разбивки
+                split_date = train_df['date'].iloc[-1]
+                fig_bt_q.add_vline(x=split_date, line_width=1.5, line_dash="dash",
+                                   line_color="#EAB308",
+                                   annotation_text="← обучение | тест →",
+                                   annotation_position="top")
+                fig_bt_q.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#9AA3BE", size=12), height=380, hovermode="x unified",
+                    legend=dict(bgcolor="rgba(28,32,48,.8)", orientation="h", x=0, y=1.02),
+                    xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
+                    yaxis=dict(gridcolor="rgba(90,99,128,.12)", title="Штуки"),
+                    margin=dict(l=10,r=10,t=30,b=10))
+                st.plotly_chart(fig_bt_q, use_container_width=True)
+
+            # ── График 2: Выручка бэктест ──────────────────────────────────
+            st.markdown("##### 💰 Выручка: прогноз vs факт")
+            fig_bt_r = go.Figure()
+            fig_bt_r.add_trace(go.Scatter(
+                x=sku_df['date'], y=sku_df['revenue_total'],
+                name="Факт (всё)", line=dict(color="#4F8EF7", width=2, dash="dot"),
+                opacity=0.4,
+                hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
+            fig_bt_r.add_trace(go.Scatter(
+                x=train_df['date'], y=train_df['revenue_total'],
+                name=f"Обучение ({len(train_df)} мес)", line=dict(color="#4F8EF7", width=2.5),
+                hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
+            fig_bt_r.add_trace(go.Scatter(
+                x=test_dates, y=actual_rev,
+                name="Факт (тест)", line=dict(color="#22C55E", width=2.5),
+                mode="lines+markers", marker=dict(size=8),
+                hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽ (факт)</b><extra></extra>"))
+            # CI выручки
+            xci_r = list(bt_rev_res.forecast_dates) + list(bt_rev_res.forecast_dates[::-1])
+            yci_r = list(bt_rev_res.ci_upper) + list(bt_rev_res.ci_lower[::-1])
+            fig_bt_r.add_trace(go.Scatter(x=xci_r, y=yci_r, fill="toself",
+                fillcolor="rgba(239,68,68,.12)", line=dict(color="rgba(0,0,0,0)"),
+                name="80% CI", hoverinfo="skip"))
+            # Прогноз выручки прямой
+            xfc_r = [pd.Timestamp(train_df['date'].iloc[-1])] + list(bt_rev_res.forecast_dates)
+            yfc_r = [float(train_df['revenue_total'].iloc[-1])] + list(bt_rev_res.forecast)
+            fig_bt_r.add_trace(go.Scatter(x=xfc_r, y=yfc_r,
+                name="Прогноз выручки", line=dict(color="#EF4444", width=2.5, dash="dash"),
+                mode="lines+markers", marker=dict(size=8),
+                hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
+            # Прогноз через штуки
+            if bt_qty_res and 'avg_price' in train_df.columns:
+                bp_bt2 = float(train_df['avg_price'].dropna().tail(3).mean())
+                rev_q2 = bt_qty_res.forecast * bp_bt2
+                xfc_q2 = [pd.Timestamp(train_df['date'].iloc[-1])] + list(bt_qty_res.forecast_dates)
+                yfc_q2 = [float(train_df['revenue_total'].iloc[-1])] + list(rev_q2)
+                fig_bt_r.add_trace(go.Scatter(x=xfc_q2, y=yfc_q2,
+                    name=f"Прогноз (шт×{bp_bt2:,.0f}₽)",
+                    line=dict(color="#F97316", width=2, dash="dash"),
+                    mode="lines+markers", marker=dict(size=6),
+                    hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
+            fig_bt_r.add_vline(x=train_df['date'].iloc[-1], line_width=1.5, line_dash="dash",
+                               line_color="#EAB308",
+                               annotation_text="← обучение | тест →",
+                               annotation_position="top")
+            fig_bt_r.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#9AA3BE", size=12), height=380, hovermode="x unified",
+                legend=dict(bgcolor="rgba(28,32,48,.8)", orientation="h", x=0, y=1.02),
+                xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
+                yaxis=dict(gridcolor="rgba(90,99,128,.12)", title="Выручка, ₽"),
+                margin=dict(l=10,r=10,t=30,b=10))
+            st.plotly_chart(fig_bt_r, use_container_width=True)
+
+            # ── Детальная таблица ──────────────────────────────────────────
+            with st.expander("📋 Детальная таблица бэктеста"):
+                bt_data = {"Месяц": [d.strftime("%Y-%m") for d in test_dates]}
+                if bt_qty_res and 'qty' in test_df.columns:
+                    bt_data["Факт шт"]    = test_df['qty'].values.astype(int)
+                    bt_data["Прогноз шт"] = bt_qty_res.forecast.round(0).astype(int)
+                    bt_data["Ошибка шт"]  = (bt_qty_res.forecast - test_df['qty'].values).round(0).astype(int)
+                bt_data["Факт выручка, ₽"]    = actual_rev.astype(int)
+                bt_data["Прогноз выручка, ₽"] = bt_rev_res.forecast.round(0).astype(int)
+                bt_data["Ошибка, ₽"]          = (bt_rev_res.forecast - actual_rev).round(0).astype(int)
+                bt_data["Ошибка %"]           = [
+                    f"{((p/a-1)*100):+.1f}%" if a>0 else "—"
+                    for p,a in zip(bt_rev_res.forecast, actual_rev)
+                ]
+                st.dataframe(pd.DataFrame(bt_data), use_container_width=True, hide_index=True)
+
+            st.info("""💡 **Интерпретация:**
+- **MAPE < 15%** — модель хорошо калиброван, прогнозу можно доверять
+- **MAPE 15–30%** — допустимо для волатильных товаров
+- **MAPE > 30%** — модель не улавливает паттерн, попробуйте другую модель или больший горизонт обучения
+- Смотрите на **Bias**: если +20% — модель систематически завышает прогноз""")
