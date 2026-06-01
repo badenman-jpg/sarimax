@@ -156,7 +156,7 @@ with tab_el:
             <div style="font-size:10px;color:#5A6380;text-transform:uppercase;">Эластичность</div>
             <div style="font-size:44px;font-weight:900;color:{ec};">{er.elasticity}</div>
             <div style="font-size:12px;color:#5A6380;">
-              {"✅ Значимо" if er.significant else "⚠️ Незначимо"} · p={er.pvalue} · R²={er.r_squared}<br>
+              {"✅ Значимо" if er.significant else "⚠️ Незначимо"} · p={er.p_value} · R²={er.r_squared}<br>
               Наблюдений: {er.n_obs} · Цена: {er.price_range[0]}–{er.price_range[1]} ₽
             </div></div>""", unsafe_allow_html=True)
             st.info(er.interpretation)
