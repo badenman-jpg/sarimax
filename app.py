@@ -525,7 +525,17 @@ with tab_bt:
             ["🤖 Авто (ансамбль)","LightGBM","ETS","SARIMAX"], key="bt_m")
         bt_run = st.button("▶️ Запустить бэктест", key="bt_run")
 
+        # Сохраняем параметры бэктеста в session_state при нажатии
         if bt_run:
+            st.session_state['bt_do_run'] = True
+            st.session_state['bt_horizon_val'] = bt_horizon
+            st.session_state['bt_force_val']   = bt_force
+
+        # Запускаем если флаг установлен
+        if st.session_state.get('bt_do_run'):
+            bt_horizon = st.session_state['bt_horizon_val']
+            bt_force   = st.session_state['bt_force_val']
+
             # Разбивка: обучение на первых N-bt_horizon, тест на последних bt_horizon
             train_df = sku_df.iloc[:-bt_horizon].copy()
             test_df  = sku_df.iloc[-bt_horizon:].copy()
