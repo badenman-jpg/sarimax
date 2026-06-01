@@ -6,7 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 import io, tempfile, os
 
-from forecaster import load_and_prepare, ensemble_forecast, EnsembleResult
+from forecaster import load_and_prepare, ensemble_forecast
 from elasticity  import calc_elasticity, apply_elasticity
 from macro_data  import get_macro_df
 
@@ -24,8 +24,7 @@ COL_MAP = {
     'Продажи/день':'qty','Цена':'avg_price',
     'Цена со скидкой маркетплейса':'avg_price_discount',
     'Цена без скидки':'avg_price_base','На складе':'stock',
-    'Рекламный бюджет':'ads_budget','Отзывы':'reviews',
-    'Рейтинг':'rating',
+    'Рекламный бюджет':'ads_budget','Отзывы':'reviews','Рейтинг':'rating',
 }
 
 # ── Сайдбар ────────────────────────────────────────────────────────────────
@@ -34,14 +33,12 @@ with st.sidebar:
     st.divider()
     uploaded = st.file_uploader("Загрузите файл (Excel/CSV)", type=["xlsx","xls","csv"])
 
-    # Читаем сырые колонки для маппинга
     raw_cols = []
     if uploaded:
         try:
-            if uploaded.name.endswith('.csv'):
-                raw_cols = list(pd.read_csv(uploaded, nrows=0).columns)
-            else:
-                raw_cols = list(pd.read_excel(uploaded, nrows=0).columns)
+            raw_cols = list(pd.read_csv(uploaded, nrows=0).columns
+                           if uploaded.name.endswith('.csv')
+                           else pd.read_excel(uploaded, nrows=0).columns)
             uploaded.seek(0)
         except Exception:
             pass
@@ -51,23 +48,22 @@ with st.sidebar:
         opts = ["— пропустить —"] + raw_cols
         def pick(label, hints):
             d = next((c for c in hints if c in raw_cols), opts[0])
-            return st.selectbox(label, opts, index=opts.index(d) if d in opts else 0,
-                                key=f"m_{label}")
-        m_date    = pick("📅 Дата",          ["Дата","date"])
-        m_sku     = pick("🏷 SKU",            ["SKU","sku_id"])
-        m_rev     = pick("💰 Выручка",        ["Выручка/день","revenue_total"])
-        m_qty     = pick("📦 Продажи шт",     ["Продажи/день","qty"])
-        m_price   = pick("💲 Цена",           ["Цена","avg_price"])
-        m_pbase   = pick("💲 Цена без скидки",["Цена без скидки","avg_price_base"])
-        m_pdisc   = pick("💲 Цена со скидкой",["Цена со скидкой маркетплейса","avg_price_discount"])
-        m_stock   = pick("🏭 Склад",          ["На складе","stock"])
-        m_ads     = pick("📣 Реклама",        ["Рекламный бюджет","ads_budget"])
-        m_reviews = pick("⭐ Отзывы",         ["Отзывы","reviews"])
-        m_rating  = pick("⭐ Рейтинг",        ["Рейтинг","rating"])
-        user_map  = {k:v for k,v in [
+            return st.selectbox(label, opts, index=opts.index(d) if d in opts else 0, key=f"m_{label}")
+        m_date  = pick("📅 Дата",           ["Дата","date"])
+        m_sku   = pick("🏷 SKU",             ["SKU","sku_id"])
+        m_rev   = pick("💰 Выручка",         ["Выручка/день","revenue_total"])
+        m_qty   = pick("📦 Продажи шт",      ["Продажи/день","qty"])
+        m_price = pick("💲 Цена",            ["Цена","avg_price"])
+        m_pbase = pick("💲 Цена без скидки", ["Цена без скидки","avg_price_base"])
+        m_pdisc = pick("💲 Цена со скидкой", ["Цена со скидкой маркетплейса","avg_price_discount"])
+        m_stock = pick("🏭 Склад",           ["На складе","stock"])
+        m_ads   = pick("📣 Реклама",         ["Рекламный бюджет","ads_budget"])
+        m_rev2  = pick("⭐ Отзывы",          ["Отзывы","reviews"])
+        m_rat   = pick("⭐ Рейтинг",         ["Рейтинг","rating"])
+        user_map = {k:v for k,v in [
             (m_date,'date'),(m_sku,'sku_id'),(m_rev,'revenue_total'),(m_qty,'qty'),
             (m_price,'avg_price'),(m_pbase,'avg_price_base'),(m_pdisc,'avg_price_discount'),
-            (m_stock,'stock'),(m_ads,'ads_budget'),(m_reviews,'reviews'),(m_rating,'rating'),
+            (m_stock,'stock'),(m_ads,'ads_budget'),(m_rev2,'reviews'),(m_rat,'rating'),
         ] if k != "— пропустить —"}
     else:
         user_map = COL_MAP
@@ -81,14 +77,13 @@ with st.sidebar:
     run = st.button("🚀 Рассчитать прогноз", type="primary", use_container_width=True)
 
 
-# ── Без файла ─────────────────────────────────────────────────────────────
+# ── Без файла ──────────────────────────────────────────────────────────────
 if uploaded is None:
     st.markdown("""<div style="text-align:center;padding:60px 20px;">
     <div style="font-size:56px;margin-bottom:16px;">📈</div>
     <h2>Sales Forecast</h2>
     <p style="color:#5A6380;max-width:500px;margin:0 auto;">
-    Загрузите Excel или CSV с историей продаж.<br>
-    Свяжите колонки в сайдбаре и нажмите Рассчитать.
+    Загрузите Excel или CSV. Прогноз штук + выручки с учётом цены, инфляции и эластичности.
     </p></div>""", unsafe_allow_html=True)
     st.stop()
 
@@ -116,11 +111,12 @@ with st.spinner("Читаем файл..."):
 # Макроданные
 macro_df = None
 if use_macro:
-    with st.spinner("Макроданные (ЦБ РФ, Росстат)..."):
+    with st.spinner("Макроданные (ЦБ РФ)..."):
         try:
             macro_df = get_macro_df(str(df['date'].min())[:10])
             usd = macro_df['usd_rate'].dropna().iloc[-1]
-            st.sidebar.success(f"✅ USD: {usd:.1f} ₽")
+            inf = macro_df['inflation_index'].dropna().iloc[-1]
+            st.sidebar.success(f"✅ USD: {usd:.1f} ₽ | ИПЦ: {inf:.1f}%")
         except Exception as e:
             st.sidebar.warning(f"Макро: {e}")
 
@@ -130,33 +126,24 @@ c1.metric("Строк", f"{len(df):,}")
 c2.metric("SKU", len(skus))
 c3.metric("Период", f"{df['date'].min().strftime('%b %Y')} — {df['date'].max().strftime('%b %Y')}")
 
-sku = st.selectbox("SKU", skus)
-sku_df = df[df['sku_id'] == sku].copy()
-
-# Выбор целевой переменной
-target_options = {"Выручка (₽)": "revenue_total"}
-if 'qty' in sku_df.columns and sku_df['qty'].sum() > 0:
-    target_options["Штуки (шт) — стабильнее для SARIMAX"] = "qty"
-target_label = st.radio(
-    "Прогнозировать:",
-    list(target_options.keys()),
-    horizontal=True,
-    help="Штуки дают более стабильный прогноз. Выручка = штуки × цена сценария."
-)
-target_col = target_options[target_label]
-use_qty_mode = (target_col == "qty")
+sku     = st.selectbox("SKU", skus)
+sku_df  = df[df['sku_id'] == sku].copy()
+has_qty = 'qty' in sku_df.columns and sku_df['qty'].sum() > 0
 
 with st.expander("📊 Данные"):
     st.dataframe(sku_df.set_index('date').tail(12))
 
+
 # ── Вкладки ────────────────────────────────────────────────────────────────
 tab_fc, tab_el, tab_sc, tab_mc = st.tabs(["📈 Прогноз","📉 Эластичность","🎯 Сценарий","🌍 Макро"])
+
 
 # ── Эластичность ──────────────────────────────────────────────────────────
 with tab_el:
     st.markdown("#### 📉 Ценовая эластичность спроса")
     if 'avg_price' not in sku_df.columns:
         st.warning("Нет колонки с ценой.")
+        er = None
     else:
         er = calc_elasticity(sku_df, price_col='avg_price', qty_col='qty',
                              revenue_col='revenue_total',
@@ -180,27 +167,25 @@ with tab_el:
             eff_e = manual_e if use_manual else er.elasticity
             st.session_state['eff_e'] = eff_e
         with col2:
-            # Симулятор
             bp = float(sku_df['avg_price'].dropna().tail(3).mean())
-            bq = float(sku_df['qty'].dropna().tail(3).mean()) if 'qty' in sku_df.columns \
-                 else float(sku_df['revenue_total'].dropna().tail(3).mean()/bp)
+            bq = float(sku_df['qty'].dropna().tail(3).mean()) if has_qty \
+                 else float(sku_df['revenue_total'].dropna().tail(3).mean() / max(bp,1))
             sp = st.slider("Новая цена, ₽", int(bp*0.5), int(bp*2.0), int(bp), step=10)
             sq = apply_elasticity(bq, bp, sp, eff_e)
-            sr = sp * sq; br = bp * bq
+            sr = sp*sq; br = bp*bq
             s1,s2,s3 = st.columns(3)
-            s1.metric("Прогноз продаж", f"{sq:,.0f} шт", f"{(sq/bq-1)*100:+.1f}%" if bq>0 else "")
-            s2.metric("Прогноз выручки",f"{sr:,.0f} ₽",  f"{(sr/br-1)*100:+.1f}%" if br>0 else "")
-            s3.metric("Текущая выручка",f"{br:,.0f} ₽")
-            # Scatter цена vs продажи
+            s1.metric("Прогноз продаж",  f"{sq:,.0f} шт",  f"{(sq/bq-1)*100:+.1f}%" if bq>0 else "")
+            s2.metric("Прогноз выручки", f"{sr:,.0f} ₽",   f"{(sr/br-1)*100:+.1f}%" if br>0 else "")
+            s3.metric("Текущая выручка", f"{br:,.0f} ₽")
             if 'avg_price' in sku_df.columns:
                 pdf = sku_df[['avg_price','revenue_total']].dropna().copy()
-                pdf['qty_est'] = pdf['revenue_total'] / pdf['avg_price'].replace(0,np.nan)
+                pdf['qty_e'] = pdf['revenue_total'] / pdf['avg_price'].replace(0,np.nan)
                 pdf = pdf[pdf['avg_price']>0].dropna()
                 fig_e = go.Figure()
-                fig_e.add_trace(go.Scatter(x=pdf['avg_price'], y=pdf['qty_est'],
-                    mode='markers', marker=dict(color='#4F8EF7',size=6,opacity=0.7), name='Факт'))
+                fig_e.add_trace(go.Scatter(x=pdf['avg_price'], y=pdf['qty_e'], mode='markers',
+                    marker=dict(color='#4F8EF7',size=6,opacity=0.7), name='Факт'))
                 xr = np.linspace(pdf['avg_price'].min(), pdf['avg_price'].max(), 50)
-                yr = [apply_elasticity(float(pdf['qty_est'].mean()), float(pdf['avg_price'].mean()), p, eff_e) for p in xr]
+                yr = [apply_elasticity(float(pdf['qty_e'].mean()), float(pdf['avg_price'].mean()), p, eff_e) for p in xr]
                 fig_e.add_trace(go.Scatter(x=xr, y=yr, mode='lines',
                     line=dict(color='#EF4444',width=2,dash='dash'), name=f'e={eff_e:.2f}'))
                 fig_e.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
@@ -210,28 +195,32 @@ with tab_el:
                     margin=dict(l=10,r=10,t=10,b=10))
                 st.plotly_chart(fig_e, use_container_width=True)
 
+
 # ── Сценарий ───────────────────────────────────────────────────────────────
 with tab_sc:
     st.markdown("#### 🎯 Настройка сценария")
-    st.caption("Отредактируйте плановые значения. Тренд вычисляется автоматически.")
+    st.caption("Тренд вычисляется автоматически. Цена и ИПЦ влияют на прогноз выручки.")
     last_date = pd.to_datetime(sku_df['date'].max())
-    fdates = pd.date_range(last_date, periods=horizon+1, freq='MS')[1:]
-    bp2 = float(sku_df['avg_price'].dropna().tail(3).mean()) if 'avg_price' in sku_df.columns else 0
-    ba  = float(sku_df['ads_budget'].dropna().tail(3).mean()) if 'ads_budget' in sku_df.columns else 0
-    bs  = float(sku_df['stock'].dropna().tail(3).mean()) if 'stock' in sku_df.columns else 100000
+    fdates    = pd.date_range(last_date, periods=horizon+1, freq='MS')[1:]
+    bp2  = float(sku_df['avg_price'].dropna().tail(3).mean())  if 'avg_price'   in sku_df.columns else 0
+    ba   = float(sku_df['ads_budget'].dropna().tail(3).mean()) if 'ads_budget'  in sku_df.columns else 0
+    bs   = float(sku_df['stock'].dropna().tail(3).mean())      if 'stock'       in sku_df.columns else 100000
     sc_data = pd.DataFrame({
-        "Месяц": fdates.strftime("%Y-%m"),
-        "Цена, ₽": [round(bp2)] * horizon,
-        "Промо-дни (%)": [0] * horizon,
-        "Склад, шт": [int(bs)] * horizon,
-        "Реклама, ₽": [int(ba)] * horizon,
+        "Месяц":          fdates.strftime("%Y-%m"),
+        "Цена, ₽":        [round(bp2)] * horizon,
+        "Промо-дни (%)":  [0]          * horizon,
+        "Склад, шт":      [int(bs)]    * horizon,
+        "Реклама, ₽":     [int(ba)]    * horizon,
     })
     if macro_df is not None:
         mfut = macro_df.reindex(fdates)
-        sc_data["USD, ₽"]    = mfut["usd_rate"].values.round(1)
-        sc_data["ИПЦ, %"]    = mfut["inflation_index"].values.round(1)
+        sc_data["USD, ₽"] = mfut["usd_rate"].values.round(1)
+        sc_data["ИПЦ, %"] = mfut["inflation_index"].values.round(1)
     edited = st.data_editor(sc_data, use_container_width=True, hide_index=True)
     st.session_state['scenario_ed'] = edited
+    st.info("💡 ИПЦ влияет на выручку: при инфляции 10% в год выручка растёт ~+0.8% в месяц.\n"
+            "Эластичность влияет: при изменении цены прогноз штук корректируется по формуле Q×(P_new/P_base)^e.")
+
 
 # ── Макро ──────────────────────────────────────────────────────────────────
 with tab_mc:
@@ -241,18 +230,20 @@ with tab_mc:
     else:
         c1m, c2m = st.columns(2)
         for col, series, title, color, ytitle in [
-            (c1m, macro_df['usd_rate'].dropna(),       "USD/RUB (ЦБ РФ)",   "#4F8EF7", "₽/$"),
-            (c2m, macro_df['inflation_index'].dropna(),"ИПЦ (Росстат)",     "#F97316", "ИПЦ %"),
+            (c1m, macro_df['usd_rate'].dropna(),        "USD/RUB (ЦБ РФ)",  "#4F8EF7", "₽/$"),
+            (c2m, macro_df['inflation_index'].dropna(), "ИПЦ (встроенные)", "#F97316", "ИПЦ %"),
         ]:
             fig_m = go.Figure(go.Scatter(x=series.index, y=series.values,
-                line=dict(color=color, width=2)))
+                line=dict(color=color,width=2)))
             fig_m.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                 font=dict(color="#9AA3BE"),height=200,
                 yaxis=dict(gridcolor="rgba(90,99,128,.12)",title=ytitle),
                 xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
-                margin=dict(l=10,r=10,t=20,b=10),title=dict(text=title,font=dict(size=13)))
+                margin=dict(l=10,r=10,t=20,b=10),
+                title=dict(text=title,font=dict(size=13)))
             col.plotly_chart(fig_m, use_container_width=True)
         st.dataframe(macro_df.tail(12).round(2))
+
 
 # ── Прогноз ────────────────────────────────────────────────────────────────
 with tab_fc:
@@ -260,66 +251,88 @@ with tab_fc:
         st.info("👈 Нажмите **Рассчитать прогноз** в сайдбаре")
         st.stop()
 
-    # Сценарий из таблицы
+    # ── Читаем сценарий ────────────────────────────────────────────────────
     scenario = {}
     if 'scenario_ed' in st.session_state:
         ed = st.session_state['scenario_ed']
-        if 'Цена, ₽'    in ed.columns: scenario['avg_price']  = float(ed['Цена, ₽'].mean())
-        if 'Склад, шт'  in ed.columns: scenario['stock']       = float(ed['Склад, шт'].mean())
-        if 'Реклама, ₽' in ed.columns: scenario['ads_budget']  = float(ed['Реклама, ₽'].mean())
-        if 'ИПЦ, %'     in ed.columns: scenario['inflation_index'] = float(ed['ИПЦ, %'].mean())
+        if 'Цена, ₽'   in ed.columns: scenario['avg_price']       = float(ed['Цена, ₽'].mean())
+        if 'Склад, шт' in ed.columns: scenario['stock']            = float(ed['Склад, шт'].mean())
+        if 'Реклама, ₽'in ed.columns: scenario['ads_budget']       = float(ed['Реклама, ₽'].mean())
+        if 'ИПЦ, %'    in ed.columns: scenario['inflation_index']  = float(ed['ИПЦ, %'].mean())
 
-    # Передаём эластичность и базовую цену для корректировки прогноза
+    # Плановая цена для расчёта выручки из штук
+    plan_price = scenario.get('avg_price',
+        float(sku_df['avg_price'].dropna().tail(3).mean()) if 'avg_price' in sku_df.columns else 1.0)
+    base_price = float(sku_df['avg_price'].dropna().tail(3).mean()) if 'avg_price' in sku_df.columns else plan_price
+
+    # Эластичность
     eff_e = st.session_state.get('eff_e', 0.0)
-    if eff_e != 0 and 'avg_price' in sku_df.columns:
-        bp_val = float(sku_df['avg_price'].dropna().tail(3).mean())
-        if bp_val > 0 and 'avg_price' in scenario:
-            scenario['elasticity']  = eff_e
-            scenario['base_price']  = bp_val
+    if eff_e != 0 and base_price > 0 and plan_price != base_price:
+        scenario['elasticity']  = eff_e
+        scenario['base_price']  = base_price
+
+    # Инфляционная поправка (месячная ставка)
+    annual_inf  = (scenario.get('inflation_index', 100) / 100) - 1.0
+    monthly_inf = (1 + annual_inf) ** (1/12) - 1
 
     force = None
     if   model_choice == "LightGBM": force = "LightGBM"
     elif model_choice == "ETS":      force = "ETS"
     elif model_choice == "SARIMAX":  force = "SARIMAX"
 
-    with st.spinner("Обучаем модели..."):
-        try:
-            result = ensemble_forecast(sku_df, target=target_col,
-                                       horizon=horizon, scenario=scenario or None,
-                                       force_model=force)
+    # ── Прогноз штук ──────────────────────────────────────────────────────
+    with st.spinner("Прогнозируем штуки..."):
+        result_qty = None
+        if has_qty:
+            try:
+                result_qty = ensemble_forecast(sku_df, target='qty',
+                                               horizon=horizon, scenario=scenario or None,
+                                               force_model=force)
+            except Exception as e:
+                st.warning(f"Прогноз штук: {e}")
 
-        # Если прогноз в штуках — пересчитываем в выручку через цену сценария
-        if use_qty_mode:
-            plan_price = scenario.get('avg_price',
-                float(sku_df['avg_price'].dropna().tail(3).mean())
-                if 'avg_price' in sku_df.columns else 1.0)
-            result.forecast  = result.forecast  * plan_price
-            result.ci_lower  = result.ci_lower  * plan_price
-            result.ci_upper  = result.ci_upper  * plan_price
-            for m in result.models:
-                m.forecast  = m.forecast  * plan_price
-                m.ci_lower  = m.ci_lower  * plan_price
-                m.ci_upper  = m.ci_upper  * plan_price
-            result.history_y = result.history_y * plan_price
+    # ── Прогноз выручки ───────────────────────────────────────────────────
+    with st.spinner("Прогнозируем выручку..."):
+        result_rev = None
+        try:
+            result_rev = ensemble_forecast(sku_df, target='revenue_total',
+                                           horizon=horizon, scenario=scenario or None,
+                                           force_model=force)
         except Exception as e:
-            st.error(f"Ошибка: {e}")
+            st.error(f"Прогноз выручки: {e}")
             st.stop()
 
-    # KPI
-    total_fc = result.forecast.sum()
-    hist_s   = result.history_y.tail(horizon).sum()
-    dpct     = (total_fc/hist_s-1)*100 if hist_s > 0 else 0
-    mv       = result.ensemble_mape
+    # ── Если есть прогноз штук — выручка = штуки × цена × инфляция ───────
+    if result_qty is not None:
+        inf_factors = np.array([(1 + monthly_inf)**(i+1) for i in range(horizon)])
+        # Эластичность уже учтена в forecaster через scenario['elasticity']
+        # Здесь применяем ценовую и инфляционную поправку поверх штук
+        price_factor = plan_price / base_price if base_price > 0 else 1.0
+        rev_from_qty         = result_qty.forecast  * plan_price * inf_factors
+        rev_from_qty_lo      = result_qty.ci_lower   * plan_price * inf_factors
+        rev_from_qty_hi      = result_qty.ci_upper   * plan_price * inf_factors
+        # Показываем оба варианта
+        has_derived_rev = True
+    else:
+        has_derived_rev = False
+
+    # ── KPI ───────────────────────────────────────────────────────────────
+    main_rev = rev_from_qty if has_derived_rev else result_rev.forecast
+    total_fc = main_rev.sum()
+    hist_s   = result_rev.history_y.tail(horizon).sum()
+    dpct     = (total_fc/hist_s - 1)*100 if hist_s > 0 else 0
+    mv       = result_rev.ensemble_mape
     ql       = "Высокая" if mv<15 else ("Средняя" if mv<30 else "Низкая")
-    bm       = min(result.models, key=lambda m: m.val_mape if np.isfinite(m.val_mape) else 999)
+    bm       = min(result_rev.models, key=lambda m: m.val_mape if np.isfinite(m.val_mape) else 999)
     dc       = "#22C55E" if dpct>=0 else "#EF4444"
 
-    k1,k2,k3,k4 = st.columns(4)
+    k1,k2,k3,k4,k5 = st.columns(5)
     for col,lbl,val,sub,clr in [
-        (k1,"Прогноз выручки", f"{total_fc:,.0f} ₽", f"за {horizon} мес.",  "#E8ECF4"),
-        (k2,"Δ vs прошлый",   f"{dpct:+.1f}%",       f"{hist_s:,.0f} ₽ факт", dc),
-        (k3,"Точность",       ql,                     f"MAPE {mv:.1f}%",     "#E8ECF4"),
-        (k4,"Лучшая модель",  bm.name,                f"MAPE {bm.val_mape:.1f}%","#E8ECF4"),
+        (k1,"Прогноз выручки",  f"{total_fc:,.0f} ₽",     f"за {horizon} мес.", "#E8ECF4"),
+        (k2,"Δ vs прошлый",     f"{dpct:+.1f}%",           f"{hist_s:,.0f} ₽",  dc),
+        (k3,"Точность (MAPE)",  ql,                        f"{mv:.1f}%",         "#E8ECF4"),
+        (k4,"Лучшая модель",    bm.name,                   f"MAPE {bm.val_mape:.1f}%","#E8ECF4"),
+        (k5,"Плановая цена",    f"{plan_price:,.0f} ₽",    f"база {base_price:,.0f} ₽","#E8ECF4"),
     ]:
         col.markdown(f"""<div class="kpi"><div class="kpi-label">{lbl}</div>
         <div class="kpi-value" style="color:{clr};">{val}</div>
@@ -327,46 +340,111 @@ with tab_fc:
 
     st.markdown("")
 
-    # График
     MC = {"LightGBM":"#22C55E","SARIMAX":"#F97316","ETS":"#06B6D4"}
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=result.history_y.index, y=result.history_y.values,
-        name="Факт", line=dict(color="#4F8EF7",width=2),
+
+    # ── ГРАФИК 1: Штуки ───────────────────────────────────────────────────
+    if result_qty is not None:
+        st.markdown("#### 📦 Прогноз продаж (штуки)")
+        st.caption("Модели работают на стабильном ряду штук — это даёт лучшую точность SARIMAX")
+        fig_q = go.Figure()
+        fig_q.add_trace(go.Scatter(x=result_qty.history_y.index, y=result_qty.history_y.values,
+            name="Факт (шт)", line=dict(color="#4F8EF7",width=2),
+            hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} шт</b><extra></extra>"))
+        xci = list(result_qty.forecast_dates)+list(result_qty.forecast_dates[::-1])
+        yci = list(result_qty.ci_upper)+list(result_qty.ci_lower[::-1])
+        fig_q.add_trace(go.Scatter(x=xci,y=yci,fill="toself",
+            fillcolor="rgba(239,68,68,.1)",line=dict(color="rgba(0,0,0,0)"),
+            name="80% CI",hoverinfo="skip"))
+        xfc = [result_qty.history_y.index[-1]]+list(result_qty.forecast_dates)
+        yfc = [float(result_qty.history_y.iloc[-1])]+list(result_qty.forecast)
+        fig_q.add_trace(go.Scatter(x=xfc,y=yfc,name="Прогноз (шт)",
+            line=dict(color="#EF4444",width=2.5,dash="dash"),mode="lines+markers",
+            marker=dict(size=8),hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} шт</b><extra></extra>"))
+        show_all = model_choice == "Все на графике"
+        for m in result_qty.models:
+            ym = [float(result_qty.history_y.iloc[-1])]+list(m.forecast)
+            fig_q.add_trace(go.Scatter(x=xfc,y=ym,
+                name=f"{m.name} MAPE {m.val_mape:.1f}%",
+                line=dict(color=MC.get(m.name,"#999"),width=1.5,dash="dot"),opacity=0.7,
+                visible=True if show_all else "legendonly"))
+        fig_q.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#9AA3BE",size=12),height=340,hovermode="x unified",
+            legend=dict(bgcolor="rgba(28,32,48,.8)",orientation="h",x=0,y=1.02),
+            xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
+            yaxis=dict(gridcolor="rgba(90,99,128,.12)",title="Штуки"),
+            margin=dict(l=10,r=10,t=10,b=10))
+        st.plotly_chart(fig_q, use_container_width=True)
+
+    # ── ГРАФИК 2: Выручка ─────────────────────────────────────────────────
+    st.markdown("#### 💰 Прогноз выручки (₽)")
+    if has_derived_rev:
+        st.caption(f"Выручка = штуки × {plan_price:,.0f} ₽ × инфляция. "
+                   f"Инфляция: {annual_inf*100:.1f}%/год → +{monthly_inf*100:.2f}%/мес")
+    fig_r = go.Figure()
+    # История
+    fig_r.add_trace(go.Scatter(x=result_rev.history_y.index, y=result_rev.history_y.values,
+        name="Факт (₽)", line=dict(color="#4F8EF7",width=2),
         hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
-    xci = list(result.forecast_dates)+list(result.forecast_dates[::-1])
-    yci = list(result.ci_upper)+list(result.ci_lower[::-1])
-    fig.add_trace(go.Scatter(x=xci,y=yci,fill="toself",
+    # CI
+    if has_derived_rev:
+        xci2 = list(result_qty.forecast_dates)+list(result_qty.forecast_dates[::-1])
+        yci2 = list(rev_from_qty_hi)+list(rev_from_qty_lo[::-1])
+        prognoz_y = [float(result_rev.history_y.iloc[-1])]+list(rev_from_qty)
+        prognoz_x = [result_rev.history_y.index[-1]]+list(result_qty.forecast_dates)
+        label_rev = "Прогноз (шт×цена×ИПЦ)"
+    else:
+        xci2 = list(result_rev.forecast_dates)+list(result_rev.forecast_dates[::-1])
+        yci2 = list(result_rev.ci_upper)+list(result_rev.ci_lower[::-1])
+        prognoz_y = [float(result_rev.history_y.iloc[-1])]+list(result_rev.forecast)
+        prognoz_x = [result_rev.history_y.index[-1]]+list(result_rev.forecast_dates)
+        label_rev = "Прогноз (выручка)"
+
+    fig_r.add_trace(go.Scatter(x=xci2,y=yci2,fill="toself",
         fillcolor="rgba(239,68,68,.1)",line=dict(color="rgba(0,0,0,0)"),
         name="80% CI",hoverinfo="skip"))
-    xfc = [result.history_y.index[-1]]+list(result.forecast_dates)
-    yfc = [float(result.history_y.iloc[-1])]+list(result.forecast)
-    fig.add_trace(go.Scatter(x=xfc,y=yfc,name="Прогноз",
+    fig_r.add_trace(go.Scatter(x=prognoz_x,y=prognoz_y,name=label_rev,
         line=dict(color="#EF4444",width=2.5,dash="dash"),mode="lines+markers",
         marker=dict(size=8),hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
+
+    # Прямой прогноз выручки как пунктир для сравнения
+    if has_derived_rev:
+        xfc2 = [result_rev.history_y.index[-1]]+list(result_rev.forecast_dates)
+        yfc2 = [float(result_rev.history_y.iloc[-1])]+list(result_rev.forecast)
+        fig_r.add_trace(go.Scatter(x=xfc2,y=yfc2,name="Прогноз (прямой, без цены/ИПЦ)",
+            line=dict(color="#9AA3BE",width=1,dash="dot"),opacity=0.6,
+            hovertemplate="%{x|%b %Y}: <b>%{y:,.0f} ₽</b><extra></extra>"))
+
     show_all = model_choice == "Все на графике"
-    for m in result.models:
-        ym = [float(result.history_y.iloc[-1])]+list(m.forecast)
-        fig.add_trace(go.Scatter(x=xfc,y=ym,
+    for m in result_rev.models:
+        ym2 = [float(result_rev.history_y.iloc[-1])]+list(m.forecast)
+        fig_r.add_trace(go.Scatter(x=xfc2 if has_derived_rev else prognoz_x, y=ym2,
             name=f"{m.name} MAPE {m.val_mape:.1f}%",
             line=dict(color=MC.get(m.name,"#999"),width=1.5,dash="dot"),opacity=0.7,
             visible=True if show_all else "legendonly"))
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#9AA3BE",size=12),height=380,hovermode="x unified",
+
+    fig_r.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#9AA3BE",size=12),height=340,hovermode="x unified",
         legend=dict(bgcolor="rgba(28,32,48,.8)",orientation="h",x=0,y=1.02),
         xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
         yaxis=dict(gridcolor="rgba(90,99,128,.12)",title="Выручка, ₽"),
         margin=dict(l=10,r=10,t=10,b=10))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig_r, use_container_width=True)
 
-    # Таблица
-    fc_df = pd.DataFrame({
-        "Месяц":       result.forecast_dates.strftime("%Y-%m"),
-        "Прогноз, ₽":  result.forecast.round(0).astype(int),
-        "Нижняя, ₽":   result.ci_lower.round(0).astype(int),
-        "Верхняя, ₽":  result.ci_upper.round(0).astype(int),
-    })
-    for m in result.models:
-        fc_df[f"{m.name}, ₽"] = m.forecast.round(0).astype(int)
+    # ── Таблица ────────────────────────────────────────────────────────────
+    st.markdown("#### 📋 Таблица прогноза")
+    fdates_str = result_rev.forecast_dates.strftime("%Y-%m")
+    fc_data    = {"Месяц": fdates_str}
+    if result_qty is not None:
+        fc_data["Прогноз шт"]    = result_qty.forecast.round(0).astype(int)
+        fc_data["Шт нижняя"]     = result_qty.ci_lower.round(0).astype(int)
+        fc_data["Шт верхняя"]    = result_qty.ci_upper.round(0).astype(int)
+    if has_derived_rev:
+        fc_data["Выручка (шт×цена×ИПЦ), ₽"] = rev_from_qty.round(0).astype(int)
+    fc_data["Выручка (прямой прогноз), ₽"]   = result_rev.forecast.round(0).astype(int)
+    fc_data["Нижняя, ₽"]                      = result_rev.ci_lower.round(0).astype(int)
+    fc_data["Верхняя, ₽"]                     = result_rev.ci_upper.round(0).astype(int)
+    fc_df = pd.DataFrame(fc_data)
+
     ct, cd = st.columns([3,1])
     with ct: st.dataframe(fc_df, use_container_width=True, hide_index=True)
     with cd:
@@ -374,57 +452,54 @@ with tab_fc:
         st.download_button("⬇️ CSV", buf.getvalue().encode("utf-8-sig"),
                            f"forecast_{sku}.csv","text/csv",use_container_width=True)
 
-    # Сравнение моделей
+    # ── Сравнение моделей ──────────────────────────────────────────────────
     with st.expander("🤖 Сравнение моделей"):
-        names  = [m.name for m in result.models]+["Ансамбль"]
-        mapes  = [m.val_mape for m in result.models]+[result.ensemble_mape]
-        bc     = ["#22C55E" if v<15 else "#EAB308" if v<30 else "#EF4444" for v in mapes]
-        bc[-1] = "#4F8EF7"
-        f2 = go.Figure(go.Bar(x=names,y=mapes,marker_color=bc,
-            text=[f"{v:.1f}%" for v in mapes],textposition="outside"))
-        f2.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#9AA3BE"),height=240,showlegend=False,
-            yaxis=dict(gridcolor="rgba(90,99,128,.12)",title="MAPE %"),
-            xaxis=dict(showgrid=False),margin=dict(l=10,r=10,t=10,b=10))
-        cl2, cr2 = st.columns(2)
-        cl2.plotly_chart(f2, use_container_width=True)
-        wdf = pd.DataFrame([{
-            "Модель": k, "Вес": f"{v*100:.1f}%",
-            "MAPE": f"{next(m.val_mape for m in result.models if m.name==k):.1f}%",
-            "Описание": {"LightGBM":"Градиентный бустинг",
-                         "ETS":"Экспоненциальное сглаживание",
-                         "SARIMAX":"ARIMA с сезонностью"}.get(k,"")
-        } for k,v in sorted(result.weights.items(), key=lambda x: -x[1])])
-        cr2.dataframe(wdf, use_container_width=True, hide_index=True)
+        tabs_m = st.tabs(["Штуки","Выручка"]) if result_qty else [None, st.container()]
+        for idx_t, (res, title) in enumerate([(result_qty,"Штуки"),(result_rev,"Выручка")]):
+            if res is None: continue
+            with (tabs_m[idx_t] if result_qty else st.container()):
+                names  = [m.name for m in res.models]+["Ансамбль"]
+                mapes  = [m.val_mape for m in res.models]+[res.ensemble_mape]
+                bc     = ["#22C55E" if v<15 else "#EAB308" if v<30 else "#EF4444" for v in mapes]
+                bc[-1] = "#4F8EF7"
+                f2 = go.Figure(go.Bar(x=names,y=mapes,marker_color=bc,
+                    text=[f"{v:.1f}%" for v in mapes],textposition="outside"))
+                f2.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#9AA3BE"),height=220,showlegend=False,
+                    yaxis=dict(gridcolor="rgba(90,99,128,.12)",title="MAPE %"),
+                    xaxis=dict(showgrid=False),margin=dict(l=10,r=10,t=10,b=10))
+                cl2,cr2 = st.columns(2)
+                cl2.plotly_chart(f2,use_container_width=True)
+                wdf = pd.DataFrame([{
+                    "Модель": k,"Вес": f"{v*100:.1f}%",
+                    "MAPE": f"{next(m.val_mape for m in res.models if m.name==k):.1f}%",
+                    "Описание": {"LightGBM":"Градиентный бустинг, все факторы",
+                                 "ETS":"Тренд + сезонность, стабильная",
+                                 "SARIMAX":"ARIMA+сезонность, нужно 3+ года"}.get(k,"")
+                } for k,v in sorted(res.weights.items(),key=lambda x:-x[1])])
+                cr2.dataframe(wdf,use_container_width=True,hide_index=True)
 
-    # Пояснение по моделям
-    with st.expander("📖 Как работают модели и почему SARIMAX может ошибаться"):
+    with st.expander("📖 Как работают модели"):
         st.markdown("""
-**LightGBM** — градиентный бустинг. Учитывает все признаки: цену, склад, рекламу,
-лаги продаж, сезонность. Хорошо работает при любом объёме данных.
-Лучший выбор для коротких рядов (< 3 лет).
+**Архитектура прогноза:**
+1. **Штуки** прогнозируются моделями (стабильный ряд → SARIMAX работает лучше)
+2. **Выручка** = Прогноз штук × Плановая цена × (1 + инфляция)^месяц
 
-**ETS (Exponential Smoothing)** — сглаживает тренд и сезонность.
-Простая и стабильная модель. Не учитывает внешние факторы.
-Хорошо работает при стабильном росте без резких скачков.
+**LightGBM** — учитывает все факторы (цена, склад, реклама, лаги). Хорошо на любом горизонте.
 
-**SARIMAX** — авторегрессия с сезонностью и экзогенными переменными.
-Требует **минимум 3 года данных** для надёжной сезонной компоненты.
-При меньшей истории переобучается на пиках и даёт большой MAPE.
-Если MAPE SARIMAX > 30% — его вес в ансамбле автоматически снижается.
+**ETS** — тренд + сезонность. Стабильна, не зависит от факторов.
 
-**Ансамбль** — взвешенное среднее: чем ниже MAPE модели на валидации,
-тем больше её вес. SARIMAX с MAPE 80% получит вес ~8%, LightGBM с MAPE 12% — ~58%.
+**SARIMAX** — ARIMA с сезонностью. Требует 3+ года истории. При малой истории переобучается.
+Включается сезонность `m=12` только при истории ≥ 36 мес.
 
-**Инфляция в прогнозе:** если в таблице Сценария задан ИПЦ, выручка
-корректируется на ежемесячный прирост цен.
+**Инфляция:** применяется к прогнозу выручки как `(1+r_месячная)^шаг`.
+ИПЦ 109.5% = +9.5%/год = +0.76%/мес → за 3 мес выручка вырастет ~+2.3% только от инфляции.
 
-**Эластичность в прогнозе:** если на вкладке Эластичность задан коэффициент
-и изменена цена в Сценарии — прогноз корректируется по формуле
-`Q_new = Q_base × (P_new/P_base)^e`, затем `Revenue = Q_new × P_new`.
+**Эластичность:** если цена изменится с 388 ₽ до 420 ₽ при e=-1.5,
+то штуки снизятся на `(420/388)^-1.5 - 1 ≈ -12%`, но выручка: `+8% цена × -12% штуки = -4%`.
         """)
 
     if mv > 30:
-        st.warning("⚠️ MAPE > 30% — добавьте больше данных (нужно 3+ года) или выберите LightGBM вручную.")
+        st.warning("⚠️ MAPE > 30% — выберите LightGBM вручную или добавьте данных.")
     elif mv < 15:
         st.success(f"✅ Точность высокая (MAPE {mv:.1f}%)")
