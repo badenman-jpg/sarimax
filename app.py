@@ -133,6 +133,19 @@ c3.metric("Период", f"{df['date'].min().strftime('%b %Y')} — {df['date']
 sku = st.selectbox("SKU", skus)
 sku_df = df[df['sku_id'] == sku].copy()
 
+# Выбор целевой переменной
+target_options = {"Выручка (₽)": "revenue_total"}
+if 'qty' in sku_df.columns and sku_df['qty'].sum() > 0:
+    target_options["Штуки (шт) — стабильнее для SARIMAX"] = "qty"
+target_label = st.radio(
+    "Прогнозировать:",
+    list(target_options.keys()),
+    horizontal=True,
+    help="Штуки дают более стабильный прогноз. Выручка = штуки × цена сценария."
+)
+target_col = target_options[target_label]
+use_qty_mode = (target_col == "qty")
+
 with st.expander("📊 Данные"):
     st.dataframe(sku_df.set_index('date').tail(12))
 
@@ -254,6 +267,15 @@ with tab_fc:
         if 'Цена, ₽'    in ed.columns: scenario['avg_price']  = float(ed['Цена, ₽'].mean())
         if 'Склад, шт'  in ed.columns: scenario['stock']       = float(ed['Склад, шт'].mean())
         if 'Реклама, ₽' in ed.columns: scenario['ads_budget']  = float(ed['Реклама, ₽'].mean())
+        if 'ИПЦ, %'     in ed.columns: scenario['inflation_index'] = float(ed['ИПЦ, %'].mean())
+
+    # Передаём эластичность и базовую цену для корректировки прогноза
+    eff_e = st.session_state.get('eff_e', 0.0)
+    if eff_e != 0 and 'avg_price' in sku_df.columns:
+        bp_val = float(sku_df['avg_price'].dropna().tail(3).mean())
+        if bp_val > 0 and 'avg_price' in scenario:
+            scenario['elasticity']  = eff_e
+            scenario['base_price']  = bp_val
 
     force = None
     if   model_choice == "LightGBM": force = "LightGBM"
@@ -262,9 +284,23 @@ with tab_fc:
 
     with st.spinner("Обучаем модели..."):
         try:
-            result = ensemble_forecast(sku_df, target='revenue_total',
+            result = ensemble_forecast(sku_df, target=target_col,
                                        horizon=horizon, scenario=scenario or None,
                                        force_model=force)
+
+        # Если прогноз в штуках — пересчитываем в выручку через цену сценария
+        if use_qty_mode:
+            plan_price = scenario.get('avg_price',
+                float(sku_df['avg_price'].dropna().tail(3).mean())
+                if 'avg_price' in sku_df.columns else 1.0)
+            result.forecast  = result.forecast  * plan_price
+            result.ci_lower  = result.ci_lower  * plan_price
+            result.ci_upper  = result.ci_upper  * plan_price
+            for m in result.models:
+                m.forecast  = m.forecast  * plan_price
+                m.ci_lower  = m.ci_lower  * plan_price
+                m.ci_upper  = m.ci_upper  * plan_price
+            result.history_y = result.history_y * plan_price
         except Exception as e:
             st.error(f"Ошибка: {e}")
             st.stop()
@@ -361,7 +397,34 @@ with tab_fc:
         } for k,v in sorted(result.weights.items(), key=lambda x: -x[1])])
         cr2.dataframe(wdf, use_container_width=True, hide_index=True)
 
+    # Пояснение по моделям
+    with st.expander("📖 Как работают модели и почему SARIMAX может ошибаться"):
+        st.markdown("""
+**LightGBM** — градиентный бустинг. Учитывает все признаки: цену, склад, рекламу,
+лаги продаж, сезонность. Хорошо работает при любом объёме данных.
+Лучший выбор для коротких рядов (< 3 лет).
+
+**ETS (Exponential Smoothing)** — сглаживает тренд и сезонность.
+Простая и стабильная модель. Не учитывает внешние факторы.
+Хорошо работает при стабильном росте без резких скачков.
+
+**SARIMAX** — авторегрессия с сезонностью и экзогенными переменными.
+Требует **минимум 3 года данных** для надёжной сезонной компоненты.
+При меньшей истории переобучается на пиках и даёт большой MAPE.
+Если MAPE SARIMAX > 30% — его вес в ансамбле автоматически снижается.
+
+**Ансамбль** — взвешенное среднее: чем ниже MAPE модели на валидации,
+тем больше её вес. SARIMAX с MAPE 80% получит вес ~8%, LightGBM с MAPE 12% — ~58%.
+
+**Инфляция в прогнозе:** если в таблице Сценария задан ИПЦ, выручка
+корректируется на ежемесячный прирост цен.
+
+**Эластичность в прогнозе:** если на вкладке Эластичность задан коэффициент
+и изменена цена в Сценарии — прогноз корректируется по формуле
+`Q_new = Q_base × (P_new/P_base)^e`, затем `Revenue = Q_new × P_new`.
+        """)
+
     if mv > 30:
-        st.warning("⚠️ MAPE > 30% — добавьте больше данных или уточните факторы.")
+        st.warning("⚠️ MAPE > 30% — добавьте больше данных (нужно 3+ года) или выберите LightGBM вручную.")
     elif mv < 15:
         st.success(f"✅ Точность высокая (MAPE {mv:.1f}%)")

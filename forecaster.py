@@ -182,8 +182,14 @@ def _fit_sarimax(y, X, horizon, future_X) -> Optional[ModelResult]:
     from pmdarima import auto_arima
     y_tr, X_tr, y_val, X_val = _split(y, X)
     try:
-        auto = auto_arima(np.log1p(y_tr), exogenous=X_tr, seasonal=True, m=12,
-                          max_p=2,max_q=2,max_P=1,max_Q=1,max_d=1,
+        # Ограничиваем сезонность при малой истории
+        use_seasonal = len(y_tr) >= 36
+        auto = auto_arima(np.log1p(y_tr), exogenous=X_tr,
+                          seasonal=use_seasonal, m=12 if use_seasonal else 1,
+                          max_p=2,max_q=2,
+                          max_P=1 if use_seasonal else 0,
+                          max_Q=1 if use_seasonal else 0,
+                          max_d=1,
                           stepwise=True,suppress_warnings=True,
                           error_action='ignore',information_criterion='bic')
         order, s_order = auto.order, auto.seasonal_order
@@ -260,9 +266,40 @@ def ensemble_forecast(sku_df: pd.DataFrame, target: str = 'revenue_total',
     ch  = sum(weights[m.name]*m.ci_upper  for m in models)
     ens = sum(weights[m.name]*m.val_mape  for m in models if np.isfinite(m.val_mape))
 
+    # Корректировка 1: инфляция (если передана)
+    # Цены растут → выручка растёт пропорционально, но покупательная способность падает
+    # Нетто-эффект: revenue *= (1 + inflation_monthly_rate) ^ step
+    if scenario and 'inflation_index' in scenario:
+        # inflation_index — годовой ИПЦ в %, например 109.5 = +9.5% в год
+        annual_rate = (scenario['inflation_index'] / 100) - 1.0
+        monthly_rate = (1 + annual_rate) ** (1/12) - 1
+        for i in range(horizon):
+            factor = (1 + monthly_rate) ** (i + 1)
+            fc[i]  *= factor
+            cl[i]  *= factor
+            ch[i]  *= factor
+
+    # Корректировка 2: ценовая эластичность
+    # Если в сценарии задана новая цена и эластичность — применяем
+    if (scenario and 'avg_price' in scenario and
+            'elasticity' in scenario and 'base_price' in scenario):
+        e    = float(scenario['elasticity'])
+        bp   = float(scenario['base_price'])
+        np_  = float(scenario['avg_price'])
+        if bp > 0 and e < 0:
+            qty_factor   = (np_ / bp) ** e          # эластичность: Q_new/Q_base
+            price_factor = np_ / bp                 # изменение цены
+            rev_factor   = qty_factor * price_factor # итог на выручку
+            fc = fc * rev_factor
+            cl = cl * rev_factor
+            ch = ch * rev_factor
+
     return EnsembleResult(
         sku=sku_id, horizon=horizon, forecast_dates=future_dates,
-        forecast=fc, ci_lower=cl, ci_upper=ch, ensemble_mape=ens,
+        forecast=np.maximum(0, fc),
+        ci_lower=np.maximum(0, cl),
+        ci_upper=np.maximum(0, ch),
+        ensemble_mape=ens,
         models=models, weights=weights, top_features=feature_cols[:10],
         feature_importance=imp, history_y=y,
         history_monthly=sku_df.set_index('date'),
