@@ -98,7 +98,7 @@ with st.sidebar:
     if use_macro:
         st.caption("Данные кэшируются на 1 час")
 
-    run = st.button("🚀 Рассчитать прогноз", type="primary", use_container_width=True)
+    run = st.button("🚀 Рассчитать прогноз", type="primary", width='stretch')
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -153,28 +153,14 @@ def load(file_bytes, file_name, mapping):
 with st.spinner("Читаем файл..."):
     try:
         file_bytes = uploaded.read()
-        raw = load(file_bytes, uploaded.name, col_mapping if raw_df is not None else {})
-        # Передаём уже переименованный файл в load_and_prepare
-        import io as _io
-        buf2 = _io.BytesIO(file_bytes)
-        buf2.name = uploaded.name
-        df = load_and_prepare(buf2)
-        # Если маппинг был, применяем его поверх
-        if raw_df is not None and col_mapping:
-            buf3 = _io.BytesIO(file_bytes)
-            buf3.name = uploaded.name
-            if uploaded.name.endswith('.csv'):
-                tmp = pd.read_csv(buf3)
-            else:
-                tmp = pd.read_excel(buf3)
-            tmp = tmp.rename(columns={k: v for k, v in col_mapping.items() if k in tmp.columns})
-            # Перезапускаем prepare на переименованных данных
-            from forecaster import load_and_prepare as lap
-            import tempfile, os
-            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tf:
-                tmp.to_excel(tf.name, index=False)
-                df = lap(tf.name)
-                os.unlink(tf.name)
+        user_mapping = col_mapping if raw_df is not None else {}
+        df_renamed = load(file_bytes, uploaded.name, user_mapping)
+        # Запускаем prepare на переименованных данных через BytesIO
+        import io as _io, tempfile, os
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tf:
+            df_renamed.to_excel(tf.name, index=False)
+            df = load_and_prepare(tf.name)
+            os.unlink(tf.name)
     except Exception as e:
         st.error(f"Ошибка загрузки: {e}")
         st.stop()
@@ -212,7 +198,7 @@ if macro_df is not None and 'date' in sku_df.columns:
     )
 
 with st.expander("📊 Предпросмотр данных"):
-    st.dataframe(sku_df.set_index('date').tail(12), use_container_width=True)
+    st.dataframe(sku_df.set_index('date').tail(12), width='stretch')
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -310,7 +296,7 @@ with tab_elast:
                     height=320, margin=dict(l=10,r=10,t=10,b=10),
                     legend=dict(bgcolor="rgba(28,32,48,.8)"),
                 )
-                st.plotly_chart(fig_e, use_container_width=True)
+                st.plotly_chart(fig_e, width='stretch')
 
             # Симулятор эластичности
             st.markdown("**Симулятор: что будет при изменении цены?**")
@@ -399,7 +385,7 @@ with tab_macro:
                                    yaxis=dict(gridcolor="rgba(90,99,128,.12)", title="₽/$"),
                                    xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
                                    height=220, margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig_usd, use_container_width=True)
+            st.plotly_chart(fig_usd, width='stretch')
         with col_m2:
             st.markdown("**ИПЦ (инфляция, Росстат)**")
             inf_plot = macro_df['inflation_index'].dropna()
@@ -414,9 +400,9 @@ with tab_macro:
                                    yaxis=dict(gridcolor="rgba(90,99,128,.12)", title="ИПЦ %"),
                                    xaxis=dict(gridcolor="rgba(90,99,128,.12)"),
                                    height=220, margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig_inf, use_container_width=True)
+            st.plotly_chart(fig_inf, width='stretch')
 
-        st.dataframe(macro_df.tail(12).round(2), use_container_width=True)
+        st.dataframe(macro_df.tail(12).round(2), width='stretch')
 
 
 # ── ВКЛАДКА: ПРОГНОЗ ──────────────────────────────────────────────────────
@@ -527,7 +513,7 @@ with tab_forecast:
         yaxis=dict(gridcolor="rgba(90,99,128,.12)", title="Выручка, ₽"),
         hovermode="x unified", margin=dict(l=10,r=10,t=10,b=10), height=380,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # Таблица прогноза
     fc_df = pd.DataFrame({
@@ -547,7 +533,7 @@ with tab_forecast:
         buf = io.StringIO()
         fc_df.to_csv(buf, index=False)
         st.download_button("⬇️ Скачать CSV", buf.getvalue().encode("utf-8-sig"),
-                           f"forecast_{sku}.csv", "text/csv", use_container_width=True)
+                           f"forecast_{sku}.csv", "text/csv", width='stretch')
 
     # Сравнение моделей
     with st.expander("🤖 Сравнение моделей и веса"):
@@ -564,7 +550,7 @@ with tab_forecast:
                 yaxis=dict(gridcolor="rgba(90,99,128,.12)",title="MAPE %"),
                 xaxis=dict(showgrid=False),
                 margin=dict(l=10,r=10,t=10,b=10),height=240,showlegend=False)
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width='stretch')
         with col_r:
             wdf = pd.DataFrame([{
                 "Модель": k,
